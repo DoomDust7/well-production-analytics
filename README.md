@@ -3,9 +3,18 @@
 > **Shell UnextGen Hackathon — Sept / Oct 2023**
 > A production-grade oil & gas analytics platform built on PySpark, Delta Lake, and Arps decline curve theory — mirroring enterprise Databricks pipelines used in the energy industry.
 
+## 🚀 Live Dashboard
+
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://oilgas-well-analytics.streamlit.app)
+
+**👉 [https://oilgas-well-analytics.streamlit.app](https://oilgas-well-analytics.streamlit.app)**
+
+4 interactive pages — Overview · Production Trends · Flaring & ESG · Forecasting (Arps DCA)
+
 ---
 
 ## Table of Contents
+- [Live Dashboard](#-live-dashboard)
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Dataset](#dataset)
