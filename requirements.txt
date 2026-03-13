@@ -8,3 +8,8 @@ seaborn>=0.13.0
 jupyter>=1.0.0
 notebook>=7.0.0
 requests>=2.31.0
+
+# Dashboard
+streamlit==1.50.0
+plotly==5.22.0
+deltalake>=0.17.0
