@@ -1,0 +1,27 @@
+# Delta Lake tables (large binary files)
+data/delta/
+
+# Generated plots
+data/plots/
+
+# Raw downloaded CSVs (re-downloaded automatically by pipeline)
+data/raw/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.pyc
+
+# Spark
+derby.log
+metastore_db/
+spark-warehouse/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
