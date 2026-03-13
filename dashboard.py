@@ -107,9 +107,19 @@ def _active_files_from_log(path: str) -> "list[str]":
     return [os.path.join(path, p) for p in (active - removed) if p.endswith(".parquet")]
 
 
+SAMPLE_DIR = os.path.join(BASE, "data", "sample")
+
+
 @st.cache_data(show_spinner=False)
 def _load(path: str) -> pd.DataFrame:
-    """Read a Delta table into a Pandas DataFrame."""
+    """Read a Delta table into a Pandas DataFrame.
+    Falls back to data/sample/<table>.csv for cloud / no-Spark deployments."""
+    # 0. CSV sample fallback (fast, works on Streamlit Cloud with no Delta/Spark)
+    table_name = os.path.basename(path)
+    csv_path = os.path.join(SAMPLE_DIR, f"{table_name}.csv")
+    if os.path.exists(csv_path):
+        return pd.read_csv(csv_path)
+
     # 1. Try delta-rs (most correct)
     try:
         from deltalake import DeltaTable
@@ -392,46 +402,72 @@ def page_esg(D: dict):
     flaring = D["flaring"].copy()
     ethane  = D["ethane"].copy()
 
+    # ── Volume-based category (real data — no synthetic ratio) ─────────────────
+    # Classify by absolute flaring volume percentiles (top-33% = High, etc.)
+    p33 = flaring["total_flared_gas_mcf"].quantile(0.33)
+    p67 = flaring["total_flared_gas_mcf"].quantile(0.67)
+    flaring["volume_category"] = flaring["total_flared_gas_mcf"].apply(
+        lambda v: "High" if v >= p67 else ("Low" if v <= p33 else "Medium")
+    )
+
     # ── KPI Cards ─────────────────────────────────────────────────────────────
-    total_flared  = flaring["total_flared_gas_mcf"].sum()
-    high_count    = int((flaring["flaring_category"] == "High").sum())
-    avg_intensity = flaring["flaring_intensity_ratio"].dropna().mean()
-    low_count     = int((flaring["flaring_category"] == "Low").sum())
+    total_flared    = flaring["total_flared_gas_mcf"].sum()
+    n_operators     = len(flaring)
+    top_flarer      = flaring.loc[flaring["total_flared_gas_mcf"].idxmax(), "operator"]
+    top_flared_vol  = flaring["total_flared_gas_mcf"].max()
+    median_mcf      = flaring["total_flared_gas_mcf"].median()
 
     cards = "".join([
-        kpi_card(fmt_num(total_flared, " MCF"), "Total Flared Gas", "across all operators"),
-        kpi_card(f"{avg_intensity:.1%}",        "Avg Flaring Intensity", "flaring / gas production"),
-        kpi_card(str(high_count),               "High-Intensity Operators", "flaring > 15% of gas"),
-        kpi_card(str(low_count),                "Low-Intensity Operators", "flaring < 5% of gas"),
+        kpi_card(fmt_num(total_flared, " MCF"),     "Total Flared Gas",      f"across {n_operators} operators"),
+        kpi_card(fmt_num(top_flared_vol, " MCF"),   "Highest Single Operator", top_flarer.title()),
+        kpi_card(fmt_num(median_mcf, " MCF"),       "Median Operator Flaring", "50th percentile"),
+        kpi_card(str(int((flaring["volume_category"] == "High").sum())),
+                 "High-Volume Flaring Ops", "top 33rd percentile by MCF"),
     ])
     st.markdown(f'<div class="kpi-row">{cards}</div>', unsafe_allow_html=True)
 
-    # ── Flaring Intensity Ranking ─────────────────────────────────────────────
-    section("Operator Flaring Intensity Ranking")
+    st.caption(
+        "ℹ️ **Data note:** Flaring volumes are real historical data (Shell Hackathon CSV). "
+        "Gas production is synthetic (Arps model). Flaring-to-production ratios are not "
+        "shown because the two datasets use different scales and time periods. "
+        "All charts below are based solely on absolute flaring volumes (real data)."
+    )
+
+    # ── Flaring Volume Ranking ────────────────────────────────────────────────
+    section("Operator Flaring Volume Ranking (Real Data)")
     col1, col2 = st.columns([3, 2])
 
+    color_map = {"Low": "#27ae60", "Medium": "#f39c12", "High": "#e74c3c"}
+
     with col1:
-        color_map = {"Low": "#27ae60", "Medium": "#f39c12", "High": "#e74c3c"}
-        fl_sorted = flaring.dropna(subset=["flaring_intensity_ratio"]).sort_values(
-            "flaring_intensity_ratio", ascending=True
-        )
+        fl_sorted = flaring.sort_values("total_flared_gas_mcf", ascending=True)
         fig = px.bar(
-            fl_sorted, x="flaring_intensity_ratio", y="operator", orientation="h",
-            color="flaring_category", color_discrete_map=color_map,
-            labels={"flaring_intensity_ratio": "Flaring Intensity (%)",
-                    "operator": "", "flaring_category": "Category"},
+            fl_sorted, x="total_flared_gas_mcf", y="operator", orientation="h",
+            color="volume_category", color_discrete_map=color_map,
+            labels={"total_flared_gas_mcf": "Total Flared Gas (MCF)",
+                    "operator": "", "volume_category": "Volume Tier"},
             template=PLOTLY_TEMPLATE,
         )
-        fig.add_vline(x=0.05,  line_dash="dash", line_color="orange", line_width=1.5,
-                      annotation_text="Medium (5%)",  annotation_position="top")
-        fig.add_vline(x=0.15, line_dash="dash", line_color="red",    line_width=1.5,
-                      annotation_text="High (15%)", annotation_position="top")
-        fig.update_layout(height=440, margin=dict(l=0, r=20, t=30, b=10))
+        fig.add_shape(
+            type="line", x0=p33, x1=p33, y0=0, y1=1, xref="x", yref="paper",
+            line=dict(dash="dash", color="orange", width=1.5),
+        )
+        fig.add_annotation(x=p33, y=1.04, xref="x", yref="paper",
+                           text="Low/Med split", showarrow=False,
+                           font=dict(color="#aaa", size=10))
+        fig.add_shape(
+            type="line", x0=p67, x1=p67, y0=0, y1=1, xref="x", yref="paper",
+            line=dict(dash="dash", color="red", width=1.5),
+        )
+        fig.add_annotation(x=p67, y=1.04, xref="x", yref="paper",
+                           text="Med/High split", showarrow=False,
+                           font=dict(color="#aaa", size=10))
+        fig.update_layout(height=480, margin=dict(l=0, r=30, t=30, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
     with col2:
-        section("Category Distribution")
-        cat_counts = flaring["flaring_category"].value_counts().reset_index()
+        section("Volume Tier Distribution")
+        cat_counts = flaring["volume_category"].value_counts().reset_index()
         cat_counts.columns = ["category", "count"]
         fig2 = px.pie(
             cat_counts, names="category", values="count",
@@ -444,47 +480,37 @@ def page_esg(D: dict):
         fig2.update_traces(textinfo="percent+label")
         st.plotly_chart(fig2, use_container_width=True)
 
-        section("Flaring Summary")
+        section("Flaring by Volume Tier")
         summary = (
-            flaring.groupby("flaring_category")
+            flaring.groupby("volume_category")
             .agg(
                 operators=("operator", "count"),
-                avg_intensity=("flaring_intensity_ratio", "mean"),
                 total_flared=("total_flared_gas_mcf", "sum"),
+                avg_flared=("total_flared_gas_mcf", "mean"),
             )
             .reset_index()
         )
-        summary["avg_intensity"] = summary["avg_intensity"].map(lambda v: f"{v:.1%}")
-        summary["total_flared"]  = summary["total_flared"].map(lambda v: fmt_num(v))
-        summary.columns = ["Category", "# Operators", "Avg Intensity", "Total Flared (MCF)"]
+        summary["total_flared"] = summary["total_flared"].map(fmt_num)
+        summary["avg_flared"]   = summary["avg_flared"].map(fmt_num)
+        summary.columns = ["Tier", "# Operators", "Total Flared", "Avg per Operator"]
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
-    # ── Flaring vs Production Scatter ─────────────────────────────────────────
-    section("Flaring Volume vs Gas Production — Outlier Analysis")
-    fl_scatter = flaring.dropna(subset=["total_flared_gas_mcf", "total_gas_production_mcf"])
-    fig3 = px.scatter(
-        fl_scatter,
-        x="total_gas_production_mcf", y="total_flared_gas_mcf",
-        size="total_flared_gas_mcf", color="flaring_category",
-        color_discrete_map=color_map,
-        hover_name="operator",
-        hover_data={"flaring_intensity_ratio": ":.3f"},
-        labels={
-            "total_gas_production_mcf": "Total Gas Production (MCF)",
-            "total_flared_gas_mcf": "Total Flared Gas (MCF)",
-            "flaring_category": "Category",
-        },
+    # ── Top 10 Flaring Operators ───────────────────────────────────────────────
+    section("Top 10 Flaring Operators — Absolute Volume (MCF)")
+    top10 = flaring.nlargest(10, "total_flared_gas_mcf").copy()
+    top10["operator_label"] = top10["operator"].str.title()
+    fig3 = px.bar(
+        top10, x="operator_label", y="total_flared_gas_mcf",
+        color="volume_category", color_discrete_map=color_map,
+        text=top10["total_flared_gas_mcf"].map(lambda v: fmt_num(v)),
+        labels={"operator_label": "Operator",
+                "total_flared_gas_mcf": "Total Flared Gas (MCF)",
+                "volume_category": "Tier"},
         template=PLOTLY_TEMPLATE,
     )
-    # Diagonal reference line (1:1)
-    max_v = max(fl_scatter["total_gas_production_mcf"].max(),
-                fl_scatter["total_flared_gas_mcf"].max())
-    fig3.add_trace(go.Scatter(
-        x=[0, max_v], y=[0, max_v * 0.15],
-        mode="lines", line=dict(dash="dot", color="orange", width=1.5),
-        name="15% threshold", showlegend=True,
-    ))
-    fig3.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=10))
+    fig3.update_traces(textposition="outside")
+    fig3.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=80),
+                       xaxis_tickangle=-30, uniformtext_minsize=8)
     st.plotly_chart(fig3, use_container_width=True)
 
     # ── Ethane vs Dry Gas ─────────────────────────────────────────────────────

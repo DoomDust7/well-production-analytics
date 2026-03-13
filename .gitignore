@@ -7,6 +7,8 @@ data/plots/
 # Raw downloaded CSVs (re-downloaded automatically by pipeline)
 data/raw/
 
+# data/sample/ is intentionally tracked (pre-exported Gold table CSVs for Streamlit Cloud)
+
 # Python
 __pycache__/
 *.py[cod]
