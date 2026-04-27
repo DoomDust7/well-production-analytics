@@ -28,7 +28,7 @@ def get_spark(app_name: str = "WellProductionAnalytics"):
                 "org.apache.spark.sql.delta.catalog.DeltaCatalog")
         .config("spark.databricks.delta.schema.autoMerge.enabled", "true")
         .config("spark.sql.shuffle.partitions", "8")
-        .config("spark.driver.memory", "4g")
+        .config("spark.driver.memory", "8g")
         .config("spark.sql.adaptive.enabled", "true")
     )
     spark = configure_spark_with_delta_pip(builder).getOrCreate()

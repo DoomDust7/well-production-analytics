@@ -1,12 +1,13 @@
 """
 Well Production Forecasting & Performance Analytics — Streamlit Dashboard
-Shell UnextGen Hackathon | Sept–Oct 2023
+Wells-Dataset: Bakken / Williston Basin, North Dakota (DoomDust7/Wells-Dataset)
 
 Pages:
   1. 🏠 Overview         — KPI cards, top operators, basin distribution
   2. 📈 Production Trends — time-series by basin/operator, quarterly heatmap
   3. 🔥 Flaring & ESG    — flaring intensity, ethane vs dry gas, scatter analysis
   4. 🔮 Forecasting       — Arps decline curves, historical vs forecast, model quality
+  5. 💰 Well Economics   — breakeven, IRR, NPV, EUR, water cut, IP benchmarks
 """
 
 import os
@@ -154,6 +155,11 @@ def load_all() -> dict:
         "well_sum":    _load(GOLD("gold_well_summary")),
         "forecast":    _load(GOLD("gold_production_forecast")),
         "silver_prod": _load(SILVER("silver_production")),
+        # New real-data tables
+        "economics":    _load(GOLD("gold_well_economics")),
+        "ip_bench":     _load(GOLD("gold_ip_benchmarks")),
+        "flaring_ts":   _load(GOLD("gold_flaring_timeseries")),
+        "three_stream": _load(GOLD("gold_three_stream_production")),
     }
 
 
@@ -196,12 +202,18 @@ def page_overview(D: dict):
     total_gas   = op["total_gas_mcf"].sum()
     n_wells     = int(well["api_number"].nunique())
     n_operators = int(op["operator"].nunique())
+    median_eur  = well["eur"].median() if "eur" in well.columns else None
+
+    year_min = well["first_production_month"].min()[:4] if "first_production_month" in well.columns and len(well) else "—"
+    year_max = well["last_production_month"].max()[:4]  if "last_production_month"  in well.columns and len(well) else "—"
+    date_range = f"{year_min} – {year_max}"
 
     cards = "".join([
         kpi_card(fmt_num(n_wells),      "Total Wells",       "unique API numbers"),
         kpi_card(str(n_operators),      "Operators",         "active producers"),
-        kpi_card(fmt_num(total_oil, " BBL"), "Cumulative Oil",  "2018 – 2023"),
-        kpi_card(fmt_num(total_gas, " MCF"), "Cumulative Gas",  "2018 – 2023"),
+        kpi_card(fmt_num(total_oil, " BBL"), "Cumulative Oil", date_range),
+        kpi_card(fmt_num(total_gas, " MCF"), "Cumulative Gas", date_range),
+        kpi_card(fmt_num(median_eur) if median_eur else "—", "Median EUR", "estimated ultimate recovery"),
     ])
     st.markdown(f'<div class="kpi-row">{cards}</div>', unsafe_allow_html=True)
 
@@ -247,17 +259,25 @@ def page_overview(D: dict):
     # ── Row 2: Operator Oil vs Gas Bubble ────────────────────────────────────
     section("Oil vs Gas Production Mix — Operator Comparison")
     op_bubble = op.dropna(subset=["total_oil_bbl", "total_gas_mcf"])
+    hover_extra = {}
+    if "ticker" in op_bubble.columns:
+        hover_extra["ticker"] = True
+    if "public_private" in op_bubble.columns:
+        hover_extra["public_private"] = True
+    hover_extra["well_count"] = True
+    hover_extra["flaring_intensity_ratio"] = ":.3f"
     fig3 = px.scatter(
         op_bubble,
         x="total_oil_bbl", y="total_gas_mcf",
         size="well_count", color="flaring_intensity_ratio",
         color_continuous_scale="RdYlGn_r",
         hover_name="operator",
-        hover_data={"well_count": True, "flaring_intensity_ratio": ":.3f"},
+        hover_data=hover_extra,
         labels={
             "total_oil_bbl": "Total Oil (BBL)",
             "total_gas_mcf": "Total Gas (MCF)",
             "flaring_intensity_ratio": "Flaring Ratio",
+            "public_private": "Company Type",
         },
         template=PLOTLY_TEMPLATE,
     )
@@ -268,16 +288,20 @@ def page_overview(D: dict):
     # ── Row 3: Well Summary Table ─────────────────────────────────────────────
     section("Well Portfolio Summary")
     display_cols = [
-        "well_name", "operator", "shale_play", "basin",
+        "well_name", "operator", "formation", "shale_play", "basin",
+        "lateral_length_ft", "completion_date",
         "first_production_month", "last_production_month",
         "cumulative_oil_bbl", "cumulative_gas_mcf",
-        "peak_oil_production", "active_months",
+        "eur", "peak_oil_production", "active_months",
     ]
     available = [c for c in display_cols if c in well.columns]
     disp = well[available].copy()
-    disp["cumulative_oil_bbl"]  = disp["cumulative_oil_bbl"].map(lambda v: fmt_num(v))
-    disp["cumulative_gas_mcf"]  = disp["cumulative_gas_mcf"].map(lambda v: fmt_num(v))
-    disp["peak_oil_production"] = disp["peak_oil_production"].map(lambda v: fmt_num(v))
+    for col in ["cumulative_oil_bbl", "cumulative_gas_mcf", "peak_oil_production", "eur"]:
+        if col in disp.columns:
+            disp[col] = disp[col].map(lambda v: fmt_num(v))
+    if "lateral_length_ft" in disp.columns:
+        disp["lateral_length_ft"] = disp["lateral_length_ft"].map(
+            lambda v: f"{v:,.0f} ft" if pd.notna(v) else "—")
     disp.columns = [c.replace("_", " ").title() for c in disp.columns]
     st.dataframe(disp, use_container_width=True, height=300)
 
@@ -399,16 +423,25 @@ def page_trends(D: dict):
 # PAGE 3 — Flaring & ESG
 # ══════════════════════════════════════════════════════════════════════════════
 def page_esg(D: dict):
-    flaring = D["flaring"].copy()
-    ethane  = D["ethane"].copy()
+    flaring    = D["flaring"].copy()
+    ethane     = D["ethane"].copy()
+    flaring_ts = D.get("flaring_ts", pd.DataFrame())
 
-    # ── Volume-based category (real data — no synthetic ratio) ─────────────────
-    # Classify by absolute flaring volume percentiles (top-33% = High, etc.)
-    p33 = flaring["total_flared_gas_mcf"].quantile(0.33)
-    p67 = flaring["total_flared_gas_mcf"].quantile(0.67)
-    flaring["volume_category"] = flaring["total_flared_gas_mcf"].apply(
-        lambda v: "High" if v >= p67 else ("Low" if v <= p33 else "Medium")
-    )
+    has_intensity = ("flaring_intensity_ratio" in flaring.columns
+                     and flaring["flaring_intensity_ratio"].notna().any())
+
+    # Classify by intensity ratio when available; fall back to volume percentiles
+    if has_intensity:
+        flaring["volume_category"] = flaring["flaring_intensity_ratio"].apply(
+            lambda v: "High" if v > 0.15 else ("Low" if v < 0.05 else "Medium")
+            if pd.notna(v) else "Unknown"
+        )
+    else:
+        p33 = flaring["total_flared_gas_mcf"].quantile(0.33)
+        p67 = flaring["total_flared_gas_mcf"].quantile(0.67)
+        flaring["volume_category"] = flaring["total_flared_gas_mcf"].apply(
+            lambda v: "High" if v >= p67 else ("Low" if v <= p33 else "Medium")
+        )
 
     # ── KPI Cards ─────────────────────────────────────────────────────────────
     total_flared    = flaring["total_flared_gas_mcf"].sum()
@@ -416,22 +449,40 @@ def page_esg(D: dict):
     top_flarer      = flaring.loc[flaring["total_flared_gas_mcf"].idxmax(), "operator"]
     top_flared_vol  = flaring["total_flared_gas_mcf"].max()
     median_mcf      = flaring["total_flared_gas_mcf"].median()
+    avg_intensity   = flaring["flaring_intensity_ratio"].mean() if has_intensity else None
 
     cards = "".join([
-        kpi_card(fmt_num(total_flared, " MCF"),     "Total Flared Gas",      f"across {n_operators} operators"),
-        kpi_card(fmt_num(top_flared_vol, " MCF"),   "Highest Single Operator", top_flarer.title()),
-        kpi_card(fmt_num(median_mcf, " MCF"),       "Median Operator Flaring", "50th percentile"),
-        kpi_card(str(int((flaring["volume_category"] == "High").sum())),
-                 "High-Volume Flaring Ops", "top 33rd percentile by MCF"),
+        kpi_card(fmt_num(total_flared, " MCF"),   "Total Flared Gas",       f"across {n_operators} operators"),
+        kpi_card(fmt_num(top_flared_vol, " MCF"), "Highest Single Operator", top_flarer.title()[:30]),
+        kpi_card(fmt_num(median_mcf, " MCF"),     "Median Operator Flaring", "50th percentile"),
+        kpi_card(f"{avg_intensity*100:.1f}%" if avg_intensity else "—",
+                 "Avg Flaring Intensity",         "flared / gross gas produced"),
     ])
     st.markdown(f'<div class="kpi-row">{cards}</div>', unsafe_allow_html=True)
 
-    st.caption(
-        "ℹ️ **Data note:** Flaring volumes are real historical data (Shell Hackathon CSV). "
-        "Gas production is synthetic (Arps model). Flaring-to-production ratios are not "
-        "shown because the two datasets use different scales and time periods. "
-        "All charts below are based solely on absolute flaring volumes (real data)."
-    )
+    # ── Monthly Flaring Trend (real per-well data) ────────────────────────────
+    if not flaring_ts.empty and "production_month" in flaring_ts.columns:
+        section("Monthly Flaring Trend by Top Operators")
+        flaring_ts["production_month"] = pd.to_datetime(flaring_ts["production_month"])
+        flr_monthly = (
+            flaring_ts.groupby(["production_month", "operator"])["flared_gas_mcf"]
+            .sum().reset_index()
+        )
+        top_flarers = (flr_monthly.groupby("operator")["flared_gas_mcf"]
+                       .sum().nlargest(8).index.tolist())
+        flr_top = flr_monthly[flr_monthly["operator"].isin(top_flarers)]
+        fig_ts = px.line(
+            flr_top.sort_values("production_month"),
+            x="production_month", y="flared_gas_mcf",
+            color="operator",
+            labels={"production_month": "Month", "flared_gas_mcf": "Flared Gas (MCF)",
+                    "operator": "Operator"},
+            color_discrete_sequence=PALETTE_MULTI,
+            template=PLOTLY_TEMPLATE,
+        )
+        fig_ts.update_layout(height=340, margin=dict(l=0, r=0, t=10, b=10),
+                             legend=dict(orientation="h", y=-0.3))
+        st.plotly_chart(fig_ts, use_container_width=True)
 
     # ── Flaring Volume Ranking ────────────────────────────────────────────────
     section("Operator Flaring Volume Ranking (Real Data)")
@@ -775,6 +826,201 @@ def page_forecast(D: dict):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PAGE 5 — Well Economics
+# ══════════════════════════════════════════════════════════════════════════════
+def page_economics(D: dict):
+    econ  = D.get("economics",  pd.DataFrame())
+    ip    = D.get("ip_bench",   pd.DataFrame())
+    three = D.get("three_stream", pd.DataFrame())
+
+    if econ.empty:
+        st.info("Well economics data not yet available. Run the pipeline first: `python run_pipeline.py --stage gold`")
+        return
+
+    econ = econ.copy()
+
+    # ── Sidebar filters ───────────────────────────────────────────────────────
+    formations = sorted(econ["formation"].dropna().unique()) if "formation" in econ.columns else []
+    sel_formations = st.sidebar.multiselect("Formation", formations, default=formations, key="econ_form")
+    if sel_formations:
+        econ = econ[econ["formation"].isin(sel_formations)]
+
+    econ_cats = sorted(econ["economics_category"].dropna().unique()) if "economics_category" in econ.columns else []
+    sel_cats = st.sidebar.multiselect("Economics Category", econ_cats, default=econ_cats, key="econ_cat")
+    if sel_cats:
+        econ = econ[econ["economics_category"].isin(sel_cats)]
+
+    # ── KPI Cards ─────────────────────────────────────────────────────────────
+    avg_be      = econ["breakeven_oil_price"].mean() if "breakeven_oil_price" in econ.columns else None
+    median_irr  = econ["irr"].median() if "irr" in econ.columns else None
+    total_npv   = econ["npv"].sum() if "npv" in econ.columns else None
+    pct_econ    = (econ["economics_category"] == "Economic").mean() * 100 if "economics_category" in econ.columns else None
+
+    cards = "".join([
+        kpi_card(f"${avg_be:.1f}" if avg_be else "—",        "Avg Breakeven Price",   "$/BBL oil"),
+        kpi_card(f"{median_irr:.1f}%" if median_irr else "—", "Median IRR",            "internal rate of return"),
+        kpi_card(fmt_num(total_npv, " $M") if total_npv else "—", "Total Portfolio NPV", "net present value"),
+        kpi_card(f"{pct_econ:.0f}%" if pct_econ else "—",    "% Economic Wells",      "at current WTI price"),
+    ])
+    st.markdown(f'<div class="kpi-row">{cards}</div>', unsafe_allow_html=True)
+
+    # ── Breakeven Price Distribution ──────────────────────────────────────────
+    section("Breakeven Oil Price Distribution by Formation")
+    if "breakeven_oil_price" in econ.columns and econ["breakeven_oil_price"].notna().any():
+        avg_wti = econ["avg_wti_price"].mean() if "avg_wti_price" in econ.columns else 65.0
+        color_col = "formation" if "formation" in econ.columns else None
+        fig1 = px.histogram(
+            econ.dropna(subset=["breakeven_oil_price"]),
+            x="breakeven_oil_price",
+            color=color_col,
+            nbins=40,
+            color_discrete_sequence=PALETTE_MULTI,
+            labels={"breakeven_oil_price": "Breakeven Oil Price ($/BBL)"},
+            template=PLOTLY_TEMPLATE,
+        )
+        fig1.add_vline(x=avg_wti, line_dash="dash", line_color="#f5a623",
+                       annotation_text=f"Avg WTI ${avg_wti:.0f}",
+                       annotation_position="top right")
+        fig1.update_layout(height=340, margin=dict(l=0, r=0, t=20, b=10),
+                           legend=dict(orientation="h", y=-0.25))
+        st.plotly_chart(fig1, use_container_width=True)
+
+    # ── Risk-Return Scatter ───────────────────────────────────────────────────
+    col1, col2 = st.columns(2)
+    with col1:
+        section("Risk-Return: Breakeven vs IRR")
+        if all(c in econ.columns for c in ["breakeven_oil_price", "irr"]):
+            scatter_df = econ.dropna(subset=["breakeven_oil_price", "irr"])
+            size_col = "eur" if ("eur" in scatter_df.columns and scatter_df["eur"].notna().any()) else None
+            if size_col:
+                scatter_df = scatter_df.dropna(subset=[size_col])
+            color_col = "economics_category" if "economics_category" in scatter_df.columns else None
+            cat_colors = {"Economic": "#27ae60", "Marginal": "#f39c12",
+                          "Uneconomic": "#e74c3c", "Unknown": "#7f8c8d"}
+            fig2 = px.scatter(
+                scatter_df,
+                x="breakeven_oil_price", y="irr",
+                size=size_col,
+                color=color_col,
+                color_discrete_map=cat_colors if color_col else None,
+                hover_name="well_name" if "well_name" in scatter_df.columns else None,
+                hover_data={"operator": True, "npv": True} if "operator" in scatter_df.columns else {},
+                labels={"breakeven_oil_price": "Breakeven ($/BBL)", "irr": "IRR (%)",
+                        "economics_category": "Category"},
+                template=PLOTLY_TEMPLATE,
+            )
+            fig2.update_layout(height=340, margin=dict(l=0, r=0, t=20, b=10))
+            st.plotly_chart(fig2, use_container_width=True)
+
+    with col2:
+        section("EUR vs Lateral Length (Drilling Efficiency)")
+        if all(c in econ.columns for c in ["lateral_length_ft", "eur"]):
+            eur_df = econ.dropna(subset=["lateral_length_ft", "eur"])
+            color_col = "formation" if "formation" in eur_df.columns else None
+            fig3 = px.scatter(
+                eur_df,
+                x="lateral_length_ft", y="eur",
+                color=color_col,
+                color_discrete_sequence=PALETTE_MULTI,
+                trendline="ols",
+                labels={"lateral_length_ft": "Lateral Length (ft)", "eur": "EUR",
+                        "formation": "Formation"},
+                template=PLOTLY_TEMPLATE,
+            )
+            fig3.update_layout(height=340, margin=dict(l=0, r=0, t=20, b=10))
+            st.plotly_chart(fig3, use_container_width=True)
+
+    # ── IP Benchmarks ─────────────────────────────────────────────────────────
+    if not ip.empty and "ip30" in ip.columns:
+        section("IP30 Performance by Formation (P50 Benchmark)")
+        ip_filt = ip.dropna(subset=["ip30"])
+        if "formation" in ip_filt.columns:
+            fig4 = px.box(
+                ip_filt, x="formation", y="ip30",
+                color="formation",
+                color_discrete_sequence=PALETTE_MULTI,
+                labels={"formation": "Formation", "ip30": "IP30 (BOE)"},
+                template=PLOTLY_TEMPLATE,
+                points="outliers",
+            )
+            fig4.update_layout(height=340, margin=dict(l=0, r=0, t=20, b=10),
+                               showlegend=False)
+            st.plotly_chart(fig4, use_container_width=True)
+
+        col3, col4 = st.columns(2)
+        with col3:
+            section("IP30 vs EUR Correlation")
+            ip_eur = ip.dropna(subset=["ip30"]).copy()
+            if "eur" not in ip_eur.columns and not econ.empty and "eur" in econ.columns:
+                ip_eur = ip_eur.merge(
+                    econ[["api_number", "eur"]].dropna(), on="api_number", how="left")
+            if "eur" in ip_eur.columns and ip_eur["eur"].notna().any():
+                ip_eur2 = ip_eur.dropna(subset=["ip30", "eur"])
+                color_col2 = "formation" if "formation" in ip_eur2.columns else None
+                fig5 = px.scatter(
+                    ip_eur2, x="ip30", y="eur", color=color_col2,
+                    color_discrete_sequence=PALETTE_MULTI,
+                    labels={"ip30": "IP30 (BOE)", "eur": "EUR"},
+                    template=PLOTLY_TEMPLATE,
+                )
+                fig5.update_layout(height=300, margin=dict(l=0, r=0, t=20, b=10))
+                st.plotly_chart(fig5, use_container_width=True)
+
+        with col4:
+            section("Performance Tier Distribution")
+            if "performance_tier" in ip.columns:
+                tier_counts = ip["performance_tier"].value_counts().reset_index()
+                tier_counts.columns = ["tier", "count"]
+                tier_colors = {"Top": "#27ae60", "Mid": "#f39c12", "Bottom": "#e74c3c"}
+                fig6 = px.pie(
+                    tier_counts, names="tier", values="count",
+                    color="tier", color_discrete_map=tier_colors,
+                    hole=0.45, template=PLOTLY_TEMPLATE,
+                )
+                fig6.update_layout(height=300, margin=dict(l=0, r=0, t=10, b=10))
+                fig6.update_traces(textinfo="percent+label")
+                st.plotly_chart(fig6, use_container_width=True)
+
+    # ── Water Cut Ranking ─────────────────────────────────────────────────────
+    if not econ.empty and "water_cut_pct" in econ.columns:
+        wat_df = econ.dropna(subset=["water_cut_pct"]).nlargest(20, "water_cut_pct")
+        if not wat_df.empty:
+            section("Water Cut by Operator (Top 20 Wells)")
+            color_col3 = "formation" if "formation" in wat_df.columns else None
+            fig7 = px.bar(
+                wat_df.sort_values("water_cut_pct"),
+                x="water_cut_pct", y="well_name" if "well_name" in wat_df.columns else "api_number",
+                orientation="h",
+                color=color_col3,
+                color_discrete_sequence=PALETTE_MULTI,
+                labels={"water_cut_pct": "Water Cut (%)",
+                        "well_name": "Well", "api_number": "API"},
+                template=PLOTLY_TEMPLATE,
+            )
+            fig7.update_layout(height=420, margin=dict(l=0, r=0, t=10, b=10))
+            st.plotly_chart(fig7, use_container_width=True)
+
+    # ── Economics Summary Table ────────────────────────────────────────────────
+    section("Well Economics Summary")
+    tbl_cols = ["well_name", "operator", "formation", "economics_category",
+                "breakeven_oil_price", "irr", "npv", "eur",
+                "cumulative_oil_bbl", "cumulative_revenue_usd", "water_cut_pct"]
+    avail = [c for c in tbl_cols if c in econ.columns]
+    tbl = econ[avail].copy()
+    for c in ["cumulative_oil_bbl", "cumulative_revenue_usd", "npv", "eur"]:
+        if c in tbl.columns:
+            tbl[c] = tbl[c].map(fmt_num)
+    for c in ["irr", "breakeven_oil_price"]:
+        if c in tbl.columns:
+            tbl[c] = tbl[c].map(lambda v: f"{v:.1f}" if pd.notna(v) else "—")
+    if "water_cut_pct" in tbl.columns:
+        tbl["water_cut_pct"] = tbl["water_cut_pct"].map(
+            lambda v: f"{v:.1f}%" if pd.notna(v) else "—")
+    tbl.columns = [c.replace("_", " ").title() for c in tbl.columns]
+    st.dataframe(tbl, use_container_width=True, height=350)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Main App
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
@@ -794,7 +1040,8 @@ def main():
 
         page = st.radio(
             "Navigation",
-            ["🏠 Overview", "📈 Production Trends", "🔥 Flaring & ESG", "🔮 Forecasting"],
+            ["🏠 Overview", "📈 Production Trends", "🔥 Flaring & ESG",
+             "🔮 Forecasting", "💰 Well Economics"],
             label_visibility="collapsed",
         )
 
@@ -806,9 +1053,9 @@ def main():
           Medallion Architecture<br>
           Arps DCA · Streamlit<br><br>
           <b style="color:#f5a623;">Data</b><br>
-          300 wells · 72 months<br>
-          8 Delta tables<br>
-          2,904 forecast rows
+          Wells-Dataset · Bakken<br>
+          Williston Basin, ND<br>
+          14 Delta tables
         </div>
         """, unsafe_allow_html=True)
 
@@ -818,10 +1065,11 @@ def main():
 
     # ── Page Title ─────────────────────────────────────────────────────────────
     titles = {
-        "🏠 Overview":          ("🏠 Overview", "Portfolio-level KPIs across all operators, wells, and basins"),
+        "🏠 Overview":          ("🏠 Overview", "Portfolio-level KPIs across all operators, wells, and basins · Bakken/Williston Basin"),
         "📈 Production Trends": ("📈 Production Trends", "Time-series analysis by basin and operator · MoM/YoY growth rates"),
-        "🔥 Flaring & ESG":     ("🔥 Flaring & ESG", "Operator flaring intensity rankings · Ethane vs dry gas commodity mix"),
-        "🔮 Forecasting":       ("🔮 Forecasting", "Arps decline curve analysis · 24-month production projections"),
+        "🔥 Flaring & ESG":     ("🔥 Flaring & ESG", "Operator flaring intensity rankings · Monthly trends · Ethane vs dry gas commodity mix"),
+        "🔮 Forecasting":       ("🔮 Forecasting", "Arps decline curve analysis · 24-month production projections on real well data"),
+        "💰 Well Economics":    ("💰 Well Economics", "Breakeven pricing · IRR/NPV · EUR vs lateral length · IP benchmarks · Water cut"),
     }
     title, subtitle = titles[page]
     st.markdown(f"## {title}")
@@ -837,6 +1085,8 @@ def main():
         page_esg(D)
     elif page == "🔮 Forecasting":
         page_forecast(D)
+    elif page == "💰 Well Economics":
+        page_economics(D)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, DoubleType, DateType,
 )
 
+import os
 from src.spark_session import silver_path, gold_path
 
 
@@ -180,7 +181,18 @@ def run_forecasting(spark: SparkSession, n_months: int = 24) -> int:
     """
     print("\n[FORECAST] Running Arps decline curve analysis...")
 
-    prod = spark.read.format("delta").load(silver_path("silver_production"))
+    # Prefer real production data when available
+    real_path = silver_path("silver_production_real")
+    if os.path.exists(real_path):
+        print("  Using silver_production_real (real Bakken data)")
+        prod = spark.read.format("delta").load(real_path)
+        if "shale_play" not in prod.columns:
+            prod = prod.withColumn("shale_play", F.coalesce(F.col("basin"), F.lit("Williston")))
+        if "well_name" not in prod.columns:
+            prod = prod.withColumn("well_name", F.col("api_number"))
+    else:
+        print("  Using silver_production (synthetic fallback)")
+        prod = spark.read.format("delta").load(silver_path("silver_production"))
 
     # Pivot oil vs gas into columns for convenience
     monthly = (
